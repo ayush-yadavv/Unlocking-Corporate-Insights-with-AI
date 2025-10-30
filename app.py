@@ -24,7 +24,7 @@ from alpha_vantage.timeseries import TimeSeries
 from textblob import TextBlob
 
 # LangChain
-from langchain.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
 from langchain.chains import RetrievalQA
