@@ -389,14 +389,29 @@ def create_rag_chain(_pdf_url, _company_name, _company_details, _industry_news, 
         
         llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.7)
         
-        # This is the RAG chain that will answer questions
-        qa_chain = RetrievalQA.from_chain_type(
+        # Create a prompt template for the QA chain
+        template = """Use the following pieces of context to answer the question at the end. 
+        If you don't know the answer, just say that you don't know, don't try to make up an answer.
+        
+        Context: {context}
+        
+        Question: {question}
+        
+        Helpful Answer:"""
+        
+        prompt = ChatPromptTemplate.from_template(template)
+        
+        # Create the document chain
+        document_chain = create_stuff_documents_chain(
             llm=llm,
-            chain_type="stuff", # "stuff" is good for smaller contexts
-            retriever=retriever,
-            return_source_documents=True,
-            verbose=False
+            prompt=prompt
         )
+        
+        # Create the retrieval chain
+        qa_chain = {
+            "context": retriever,
+            "question": RunnablePassthrough()
+        } | document_chain
         
         st.success("Analysis complete. You can now ask questions.")
         return qa_chain
