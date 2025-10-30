@@ -52,20 +52,13 @@ def setup_credentials():
     Returns the path to the credentials file.
     """
     try:
-        # Load the service account credentials from Streamlit secrets
-        creds_json = st.secrets["gcp_service_account"]
-        
-        # Create a temporary file to store the credentials
+        # Directly read the gcp_service_account section as a dict from st.secrets
+        creds_json = dict(st.secrets["gcp_service_account"])
         with NamedTemporaryFile(delete=False, suffix=".json") as temp_file:
             temp_file.write(json.dumps(creds_json).encode())
             creds_path = temp_file.name
-        
-        # Set the environment variable for Google Cloud libraries
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
-        
-        # Set Google API Key for LangChain
         os.environ["GOOGLE_API_KEY"] = st.secrets["google_api_key"]
-
         return creds_path
     except Exception as e:
         st.error(f"Error setting up credentials: {e}")
