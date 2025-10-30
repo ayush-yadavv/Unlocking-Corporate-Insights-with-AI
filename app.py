@@ -4,16 +4,12 @@ import json
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import plotly.express as px
-import requests
-from io import BytesIO
 from tempfile import NamedTemporaryFile
 
 # Google Cloud & Vertex AI
 from google.cloud import storage
 import vertexai
 from vertexai.generative_models import GenerativeModel
-import vertexai.preview.generative_models as generative_models
 
 # Google Search
 from googleapiclient.discovery import build
@@ -42,19 +38,9 @@ def format_market_cap(market_cap):
         return str(market_cap)
 
 # LangChain
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
-from langchain_core.retrievers import BaseRetriever
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains.retrieval_qa.base import RetrievalQA
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import chromadb
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # --- Page Configuration ---
 st.set_page_config(
