@@ -14,3 +14,4 @@ chromadb
 sentence-transformers
 pypdf
 smart_open
+plotly
