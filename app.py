@@ -2,8 +2,9 @@ import streamlit as st
 import os
 import json
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.express as px
 import requests
 from io import BytesIO
 from tempfile import NamedTemporaryFile
@@ -23,9 +24,26 @@ from alpha_vantage.timeseries import TimeSeries
 # Data Analysis & Sentiment
 from textblob import TextBlob
 
+def format_market_cap(market_cap):
+    """Format market cap value into human-readable format (e.g., 1.2B, 3.4T)"""
+    if market_cap in [None, 'N/A', '']:
+        return 'N/A'
+    try:
+        num = float(market_cap)
+        if num >= 1e12:  # Trillions
+            return f'${num/1e12:.2f}T'
+        elif num >= 1e9:  # Billions
+            return f'${num/1e9:.2f}B'
+        elif num >= 1e6:  # Millions
+            return f'${num/1e6:.2f}M'
+        else:
+            return f'${num:,.2f}'
+    except (ValueError, TypeError):
+        return str(market_cap)
+
 # LangChain
 from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.vectorstores import Chroma
 from langchain.chains import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -42,7 +60,13 @@ st.set_page_config(
     layout="centered"
 )
 
-st.title("📈 Financial Analysis RAG Chatbot")
+# Main title
+st.title("📊 Corporate Financial Insights & Analysis")
+st.markdown("---")
+
+# Initialize session state for chat
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Please upload an annual report and provide a company name, then click 'Run Analysis' to begin."}]
 
 # --- Authentication & Setup ---
 
@@ -212,14 +236,80 @@ def get_stock_data(company_name):
         df.index = pd.to_datetime(df.index)
         df = df.sort_index()
         
-        # Create Plot
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(df['4. close'], marker='o', linestyle='-')
-        ax.set_title(f'{ticker} Intraday 60-minute Close Prices')
-        ax.set_xlabel('Time')
-        ax.set_ylabel('Close Price')
-        ax.grid(axis='y')
-        plt.tight_layout()
+        # Create interactive Plotly figure
+        fig = make_subplots(rows=2, cols=1, 
+                          shared_xaxes=True, 
+                          vertical_spacing=0.1,
+                          row_heights=[0.7, 0.3])
+        
+        # Add candlestick chart
+        fig.add_trace(
+            go.Candlestick(
+                x=df.index,
+                open=df['1. open'],
+                high=df['2. high'],
+                low=df['3. low'],
+                close=df['4. close'],
+                name='OHLC',
+                increasing_line_color='#2ecc71',  # Green for up
+                decreasing_line_color='#e74c3c'   # Red for down
+            ),
+            row=1, col=1
+        )
+        
+        # Add volume as barchart
+        fig.add_trace(
+            go.Bar(
+                x=df.index,
+                y=df['5. volume'],
+                name='Volume',
+                marker_color='#3498db',
+                opacity=0.5
+            ),
+            row=2, col=1
+        )
+        
+        # Add moving averages
+        df['SMA20'] = df['4. close'].rolling(window=20).mean()
+        df['SMA50'] = df['4. close'].rolling(window=50).mean()
+        
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['SMA20'],
+                name='20-SMA',
+                line=dict(color='#f39c12', width=1.5)
+            ),
+            row=1, col=1
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=df.index,
+                y=df['SMA50'],
+                name='50-SMA',
+                line=dict(color='#9b59b6', width=1.5)
+            ),
+            row=1, col=1
+        )
+        
+        # Update layout
+        fig.update_layout(
+            title=f'{ticker} Intraday Stock Analysis',
+            xaxis_title='Date',
+            yaxis_title='Price',
+            template='plotly_dark',
+            height=800,
+            showlegend=True,
+            xaxis2_title='Date',
+            yaxis2_title='Volume',
+            hovermode='x unified',
+            xaxis=dict(rangeslider=dict(visible=False))
+        )
+        
+        # Update y-axes
+        fig.update_yaxes(title_text='Price', row=1, col=1)
+        fig.update_yaxes(title_text='Volume', row=2, col=1)
         
         return overview_data, df, fig
     
@@ -375,9 +465,14 @@ def calculate_valuation_metrics(stock_data):
         metrics['Beta (5Y Monthly)'] = get_metric('Beta')
         
         # 52-Week Price Change
-        week52 = safe_float_convert(stock_data.get('52WeekChange'))
+        week52_raw = stock_data.get('52WeekChange')
+        print(f"Debug - 52WeekChange raw value: {week52_raw}")
+        week52 = safe_float_convert(week52_raw)
+        print(f"Debug - 52WeekChange after conversion: {week52}")
         if week52 is not None:
             metrics['52-Week Change'] = f"{week52:+.2%}"
+        else:
+            print(f"Debug - 52WeekChange is None, available keys: {list(stock_data.keys())}")
         
         # Additional metrics with safe handling
         metrics['EPS'] = get_metric('EPS', 'float')
@@ -391,18 +486,35 @@ def calculate_valuation_metrics(stock_data):
     return metrics
 
 def display_analysis_summary(company_name, company_details, sentiment_score, stock_overview, industry_news, company_news, stock_plot=None):
-    """Display a detailed investor-focused analysis summary in the main content area."""
-    st.header(f"📈 {company_name} - Investor Analysis")
+    """Display a comprehensive financial analysis summary in the main content area."""
+    st.header(f"📊 {company_name}")
     
     # Calculate additional metrics
     valuation_metrics = calculate_valuation_metrics(stock_overview)
+    
+    # Debug stock_overview keys
+    print(f"Debug - Available stock_overview keys: {list(stock_overview.keys())}")
     
     # Key Metrics Row 1
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        market_cap = stock_overview.get('MarketCapitalization', 'N/A')
-        st.metric("Market Cap", market_cap if market_cap != 'N/A' else 'N/A')
+        market_cap = stock_overview.get('MarketCapitalization')
+        if market_cap and market_cap != 'N/A':
+            try:
+                # Convert to float and format in billions or millions
+                market_cap_float = float(market_cap)
+                if market_cap_float >= 1_000_000_000:
+                    formatted_market_cap = f"${market_cap_float/1_000_000_000:.2f}B"
+                elif market_cap_float >= 1_000_000:
+                    formatted_market_cap = f"${market_cap_float/1_000_000:.2f}M"
+                else:
+                    formatted_market_cap = f"${market_cap_float:,.2f}"
+            except (ValueError, TypeError):
+                formatted_market_cap = 'N/A'
+        else:
+            formatted_market_cap = 'N/A'
+        st.metric("Market Cap", format_market_cap(stock_overview.get('MarketCapitalization')))
     with col2:
         pe_ratio = stock_overview.get('PERatio', 'N/A')
         st.metric("P/E Ratio", f"{pe_ratio}x" if pe_ratio != 'N/A' else 'N/A')
@@ -430,45 +542,269 @@ def display_analysis_summary(company_name, company_details, sentiment_score, sto
         st.metric("52-Week Change", week52change if week52change != 'N/A' else 'N/A')
     
     # Tabs for different sections
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        "Market Overview",
         "Investment Thesis", 
         "Valuation", 
         "Financial Health", 
         "Growth & Returns",
-        "Risks & Opportunities"
+        "Risks & Opportunities",
+        "Competitive Landscape"
     ])
     
-    with tab1:  # Investment Thesis
-        col1, col2 = st.columns([2, 1])
+    with tab1:  # Market Overview
+        st.subheader("Market Analysis")
         
-        with col1:
-            st.subheader("Investment Highlights")
-            st.markdown("""
-            - **Market Leader**: Dominant position in digital advertising with Google Search and YouTube
-            - **Cloud Growth**: Rapidly growing Google Cloud Platform (GCP) with strong enterprise adoption
-            - **AI Leadership**: Leading AI/ML capabilities through DeepMind and Google Research
-            - **Diversified Revenue**: Multiple growth drivers across advertising, cloud, and hardware
-            - **Strong Balance Sheet**: Significant cash reserves with minimal debt
-            - **Innovation Pipeline**: Major investments in AI, quantum computing, and autonomous vehicles
-            """)
+        # Market Metrics
+        st.markdown("### Key Market Metrics")
+        mcol1, mcol2, mcol3 = st.columns(3)
+        with mcol1:
+            st.metric("Industry", company_details.get('industry', 'N/A'))
+            st.metric("Market Sentiment", f"{sentiment_score:.1f}/10.0" if sentiment_score else 'N/A')
+        with mcol2:
+            st.metric("52-Week High/Low", 
+                     f"${stock_overview.get('52WeekHigh', 'N/A')} / ${stock_overview.get('52WeekLow', 'N/A')}" 
+                     if stock_overview.get('52WeekHigh') and stock_overview.get('52WeekLow') else 'N/A')
+            st.metric("Volume (Avg)", f"{int(float(stock_overview.get('Volume', 0)) / 1_000_000):.1f}M" 
+                     if stock_overview.get('Volume') else 'N/A')
+        with mcol3:
+            st.metric("Beta", stock_overview.get('Beta', 'N/A'))
+            st.metric("Short Ratio", stock_overview.get('ShortRatio', 'N/A'))
+        
+        # Market Trends
+        st.markdown("### Market Trends")
+        st.markdown("""
+        - **Industry Position**: {company_name} holds a {position} position in the {industry} sector
+        - **Competitive Landscape**: Facing competition from {competitors}
+        - **Regulatory Environment**: {regulatory_notes}
+        - **Technological Trends**: {tech_trends}
+        - **Consumer Sentiment**: {sentiment_analysis}
+        """.format(
+            company_name=company_name,
+            position=company_details.get('position', 'leading'),
+            industry=company_details.get('industry', 'its industry'),
+            competitors=company_details.get('competitors', 'major industry players'),
+            regulatory_notes=company_details.get('regulatory_notes', 'Stable regulatory environment'),
+            tech_trends=company_details.get('tech_trends', 'Benefiting from digital transformation trends'),
+            sentiment_analysis='Positive' if sentiment_score and sentiment_score >= 6 else 
+                             'Neutral' if sentiment_score and sentiment_score >= 4 else 'Negative'
+        ))
+        
+        # Industry News Highlights
+        if industry_news and len(industry_news) > 0:
+            st.markdown("### Industry News Highlights")
+            for i, news in enumerate(industry_news[:3], 1):
+                st.markdown(f"{i}. **{news.get('title', 'No title')}**")
+                st.caption(f"{news.get('snippet', 'No description')} [Read more]({news.get('link', '#')})")
+    
+    with tab2:  # Investment Thesis - Single Column Layout
+        # Company Overview & Financial Health
+        with st.expander("🏢 Company Overview & Financial Health", expanded=True):
+            # Two rows of metrics for better mobile responsiveness
+            metric_cols1 = st.columns(4)
+            with metric_cols1[0]: 
+                st.metric("Market Cap", format_market_cap(stock_overview.get('MarketCapitalization')))
+            with metric_cols1[1]: st.metric("Beta", stock_overview.get('Beta', 'N/A'))
+            with metric_cols1[2]: st.metric("ROE (TTM)", valuation_metrics.get('ROE (TTM)', 'N/A'))
+            with metric_cols1[3]: st.metric("FCF Yield", valuation_metrics.get('FCF Yield', 'N/A'))
             
-            st.subheader("Recent Developments")
+            metric_cols2 = st.columns(4)
+            with metric_cols2[0]: 
+                st.metric("52-Week Range", f"${stock_overview.get('52WeekLow', 'N/A')} - ${stock_overview.get('52WeekHigh', 'N/A')}")
+            with metric_cols2[1]: 
+                st.metric("Volume (Avg)", f"{int(float(stock_overview.get('Volume', 0)) / 1_000_000):.1f}M")
+            with metric_cols2[2]: 
+                st.metric("Debt/Equity", valuation_metrics.get('Debt/Equity', 'N/A'))
+            with metric_cols2[3]: 
+                st.metric("Div Yield", valuation_metrics.get('Dividend Yield', '0.0%'))
+        
+        # Stock Chart with unique key
+        if stock_plot is not None:
+            # Use a counter to ensure unique keys across reruns
+            if 'chart_counter' not in st.session_state:
+                st.session_state.chart_counter = 0
+            st.session_state.chart_counter += 1
+            chart_key = f"stock_chart_{st.session_state.chart_counter}"  # Unique key with counter
+            st.plotly_chart(stock_plot, use_container_width=True, key=chart_key)
+        
+        # Investment Highlights
+        st.subheader("🎯 Investment Highlights")
+        
+        with st.container(border=True):
+            st.markdown("### 🚀 Growth & Competitive Advantages")
             st.markdown("""
-            - Launched next-gen AI models with enhanced capabilities
-            - Expanding cloud infrastructure with new data center regions
-            - Strategic partnerships in healthcare and financial services
-            - Increased focus on privacy and data security
-            - Share buyback program in place
+            - **Market Position**: Leading player with expanding TAM in core markets
+            - **Innovation**: Strong product pipeline and R&D investments
+            - **Global Expansion**: Significant opportunities in emerging markets
+            - **Competitive Moats**: Network effects, high switching costs, and brand strength
+            - **Financial Strength**: Robust balance sheet with strong cash flow generation
+            - **Operational Excellence**: Consistent margin improvement and cost optimization
+            - **Talent & Leadership**: Experienced management team with proven track record
+            - **Sustainability**: Strong ESG practices and long-term value creation
             """)
         
-        with col2:
-            if stock_plot:
-                st.pyplot(stock_plot)
-            
-            st.metric("Current Price", stock_overview.get('Price', 'N/A'))
-            st.metric("52-Week Range", 
-                     f"{stock_overview.get('52WeekLow', 'N/A')} - {stock_overview.get('52WeekHigh', 'N/A')}")
-            st.metric("Analyst Consensus", "Buy", "+15% Upside")
+        # Analyst Consensus
+        if stock_overview.get('AnalystTargetPrice'):
+            with st.container(border=True):
+                st.markdown("### 📈 Analyst Consensus")
+                current_price = float(stock_overview.get('Price', 0))
+                target_price = float(stock_overview.get('AnalystTargetPrice', 0))
+                if current_price and target_price:
+                    upside = ((target_price - current_price) / current_price) * 100
+                    
+                    # Create columns for better layout of metrics
+                    cols = st.columns(2)
+                    with cols[0]:
+                        st.metric("Current Price", f"${current_price:.2f}")
+                        st.metric("Price Target", 
+                                f"${target_price:.2f}", 
+                                f"{upside:+.1f}% Upside" if upside > 0 else f"{abs(upside):.1f}% Downside")
+                    
+                    with cols[1]:
+                        rating = min(5, max(1, round((upside + 10) / 5)))
+                        st.markdown("**Analyst Rating**")
+                        st.markdown(f"{'★' * rating}{'☆' * (5 - rating)} "
+                                  f"({'Strong Buy' if rating >= 4 else 'Buy' if rating >= 3 else 'Hold'})")
+                        
+                        progress = min(100, max(0, (current_price / target_price) * 100))
+                        st.markdown(f"**Progress to Target**")
+                        st.progress(progress / 100, 
+                                  f"{current_price:.2f} / {target_price:.2f} ({progress:.1f}%)")
+        
+        # Stock Metrics
+        if 'df' in locals() and df is not None and not df.empty:
+            try:
+                latest = df.iloc[-1]
+                prev_close = df.iloc[-2]['4. close'] if len(df) > 1 else latest['4. close']
+                price_change = latest['4. close'] - prev_close
+                pct_change = (price_change / prev_close) * 100
+                
+                st.subheader("📊 Stock Metrics")
+                metric_cols = st.columns(4)
+                with metric_cols[0]:
+                    st.metric("Current Price", 
+                             f"${latest['4. close']:.2f}", 
+                             f"{price_change:+.2f} ({pct_change:+.2f}%)",
+                             delta_color="normal")
+                with metric_cols[1]:
+                    st.metric("Daily Range", 
+                             f"${latest['2. high']:.2f} / ${latest['3. low']:.2f}")
+                with metric_cols[2]:
+                    st.metric("Volume", f"{int(latest['5. volume']/1000):,}K")
+                with metric_cols[3]:
+                    st.metric("Moving Averages", 
+                             f"20d: ${latest.get('SMA20', 0):.2f} | 50d: ${latest.get('SMA50', 0):.2f}")
+                
+                # Technical Indicators - Only show if we have at least one valid technical indicator
+                has_technical_data = any([
+                    stock_overview.get('RSI (14)') not in [None, 'N/A'],
+                    all(k in stock_overview and stock_overview[k] not in [None, 'N/A'] 
+                        for k in ['MACD', 'MACD_Signal']),
+                    all(k in stock_overview and stock_overview[k] not in [None, 'N/A'] 
+                        for k in ['50DayMovingAverage', '200DayMovingAverage']),
+                    stock_overview.get('Beta') not in [None, 'N/A']
+                ])
+                
+                if has_technical_data:
+                    with st.expander("Technical Indicators", expanded=False):
+                        tech_cols = st.columns(2)
+                        with tech_cols[0]:
+                            rsi = stock_overview.get('RSI (14)', 'N/A')
+                            if rsi not in [None, 'N/A']:
+                                st.metric("RSI (14)", 
+                                        str(rsi) if rsi != 'N/A' else 'N/A',
+                                        "Overbought" if isinstance(rsi, (int, float)) and rsi > 70 else 
+                                        "Oversold" if isinstance(rsi, (int, float)) and rsi < 30 else 
+                                        "Neutral" if rsi != 'N/A' else '')
+                        
+                            macd = stock_overview.get('MACD', 'N/A')
+                            macd_signal = stock_overview.get('MACD_Signal', None)
+                            if macd not in [None, 'N/A'] and macd_signal not in [None, 'N/A']:
+                                macd_status = 'Bullish' if macd > macd_signal else 'Bearish' if macd < macd_signal else 'Neutral'
+                                st.metric("MACD", macd_status + ' Crossover' if macd_status != 'Neutral' else 'Neutral')
+                        
+                        with tech_cols[1]:
+                            ma50 = stock_overview.get('50DayMovingAverage', 'N/A')
+                            ma200 = stock_overview.get('200DayMovingAverage', 'N/A')
+                            if ma50 not in [None, 'N/A'] and ma200 not in [None, 'N/A']:
+                                ma_status = 'Golden Cross' if ma50 > ma200 else 'Death Cross' if ma50 < ma200 else 'Neutral'
+                                st.metric("50/200 MA", ma_status)
+                        
+                            beta = stock_overview.get('Beta', 'N/A')
+                            if beta not in [None, 'N/A']:
+                                try:
+                                    beta_float = float(beta)
+                                    vol = 'High' if beta_float > 1.2 else 'Low' if beta_float < 0.8 else 'Medium'
+                                    st.metric("Volatility", f"{vol} (β={beta_float:.2f})")
+                                except (ValueError, TypeError):
+                                    pass
+                
+            except Exception as e:
+                st.warning(f"Could not load stock metrics: {str(e)}")
+                
+                # Only show metrics if we have valid data
+                if stock_overview.get('Price') not in [None, 'N/A']:
+                    st.metric("Current Price", f"${stock_overview.get('Price'):.2f}")
+                
+                if all(k in stock_overview and stock_overview[k] not in [None, 'N/A'] 
+                       for k in ['52WeekLow', '52WeekHigh']):
+                    try:
+                        low = float(stock_overview['52WeekLow'])
+                        high = float(stock_overview['52WeekHigh'])
+                        st.metric("52-Week Range", f"${low:.2f} - ${high:.2f}")
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Only show analyst consensus if we have a price target
+                if stock_overview.get('AnalystTargetPrice') and stock_overview.get('AnalystRating'):
+                    with st.container(border=True):
+                        st.markdown("### 📈 Analyst Consensus")
+                        
+                        current_price = float(stock_overview.get('Price', 0))
+                        target_price = float(stock_overview.get('AnalystTargetPrice', 0))
+                        
+                        if current_price and target_price:
+                            upside = ((target_price - current_price) / current_price) * 100
+                            
+                            # Create columns for better layout
+                            cols = st.columns(2)
+                            
+                            with cols[0]:
+                                st.metric("Current Price", f"${current_price:.2f}")
+                                st.metric("Price Target", 
+                                         f"${target_price:.2f}", 
+                                         f"{upside:+.1f}% Upside" if upside > 0 
+                                         else f"{abs(upside):.1f}% Downside" if upside < 0 
+                                         else "0.0%")
+                            
+                            with cols[1]:
+                                # Calculate rating (example: convert text rating to stars)
+                                rating_text = stock_overview.get('AnalystRating', '').lower()
+                                if 'strong buy' in rating_text:
+                                    rating = 5
+                                elif 'buy' in rating_text:
+                                    rating = 4
+                                elif 'hold' in rating_text:
+                                    rating = 3
+                                elif 'sell' in rating_text:
+                                    rating = 2
+                                elif 'strong sell' in rating_text:
+                                    rating = 1
+                                else:
+                                    rating = 0
+                                
+                                st.markdown("**Analyst Rating**")
+                                st.markdown(f"{'★' * rating}{'☆' * (5 - rating)} "
+                                           f"({rating_text.title() if rating > 0 else 'No Rating'})")
+                                
+                                # Show progress to target
+                                if current_price and target_price:
+                                    progress = min(100, max(0, (current_price / target_price) * 100))
+                                    st.markdown(f"**Progress to Target**")
+                                    st.progress(progress / 100, 
+                                               f"${current_price:.2f} / ${target_price:.2f} ({progress:.1f}%)")
+                else:
+                    st.metric("Analyst Consensus", "N/A")
     
     with tab2:  # Valuation
         st.subheader("Valuation Metrics")
@@ -520,12 +856,18 @@ def display_analysis_summary(company_name, company_details, sentiment_score, sto
         col1, col2 = st.columns(2)
         
         with col1:
-            st.metric("Gross Margin (TTM)", "55.7%", "+120 bps YoY")
-            st.metric("Operating Margin (TTM)", "29.5%", "+80 bps YoY")
+            st.metric("Gross Margin (TTM)", 
+                    valuation_metrics.get('Gross Margin (TTM)', 'N/A'),
+                    delta=valuation_metrics.get('Gross Margin YoY Change', None),
+                    delta_color="normal")
+            st.metric("Operating Margin (TTM)",
+                    valuation_metrics.get('Operating Margin (TTM)', 'N/A'),
+                    delta=valuation_metrics.get('Operating Margin YoY Change', None),
+                    delta_color="normal")
             
         with col2:
             st.metric("ROE (TTM)", valuation_metrics.get('ROE (TTM)', 'N/A'))
-            st.metric("ROIC (TTM)", "28.3%")
+            st.metric("ROIC (TTM)", valuation_metrics.get('ROIC (TTM)', 'N/A'))
     
     with tab4:  # Growth & Returns
         st.subheader("Growth Metrics")
@@ -533,8 +875,8 @@ def display_analysis_summary(company_name, company_details, sentiment_score, sto
         col1, col2 = st.columns(2)
         
         with col1:
-            st.metric("Revenue Growth (YoY)", "8.5%")
-            st.metric("EPS Growth (YoY)", "12.3%")
+            st.metric("Revenue Growth (YoY)", valuation_metrics.get('Revenue Growth (YoY)', 'N/A'))
+            st.metric("EPS Growth (YoY)", valuation_metrics.get('EPS Growth (YoY)', 'N/A'))
             st.metric("3-Yr Revenue CAGR", "15.2%")
             
         with col2:
@@ -607,15 +949,30 @@ except Exception as e:
 
 # --- Sidebar for Inputs ---
 with st.sidebar:
-    st.header("1. Configuration")
-    company_name_input = st.text_input("Enter Company Name", "Microsoft")
+    st.header("🔍 Analysis Setup")
+    
+    # Company Information
+    company_name_input = st.text_input("Company Name", "")
+    
+    # Document Upload
     uploaded_file = st.file_uploader("Upload Annual Report (PDF)", type="pdf")
-
-    run_button = st.button("Run Analysis")
-
-    # This block will hold the analysis results
-    st.header("2. Analysis Summary")
-    summary_placeholder = st.empty()
+    
+    # Simple Action Button
+    run_analysis = st.button("Analyze", type="primary", use_container_width=True)
+    
+    # Simple Help Text
+    st.caption("ℹ️ Upload a company's annual report PDF to begin analysis.")
+    
+    # Analysis Results Section (will be populated after analysis)
+    if 'analysis_complete' in st.session_state and st.session_state.analysis_complete:
+        st.divider()
+        st.subheader("Analysis Complete")
+        st.caption("View the main panel for detailed insights.")
+        
+        # Add a button to clear the analysis
+        if st.button("Clear Analysis", type="secondary"):
+            st.session_state.analysis_complete = False
+            st.rerun()
 
 # Initialize session state for chat and chain
 if "messages" not in st.session_state:
@@ -624,20 +981,22 @@ if "rag_chain" not in st.session_state:
     st.session_state.rag_chain = None
 
 # --- Main Processing ---
-if run_button:
-    if not company_name_input or uploaded_file is None:
-        st.error("Please provide both a company name and a PDF file.")
-    else:
-        # Clear session to force re-analysis
-        st.session_state.rag_chain = None
-        st.session_state.messages = []
-        
-        with st.spinner("Starting analysis... This may take a few minutes."):
-            # 1. Upload PDF
-            pdf_bytes = uploaded_file.getvalue()
-            blob_name = f"input_documents/{company_name_input}_annual_report.pdf"
-            gcs_path = upload_file_to_gcs(pdf_bytes, GCS_BUCKET, blob_name)
-            pdf_temp_url = get_pdf_temp_url(GCS_BUCKET, blob_name)
+# Show loading state during analysis
+with st.spinner("🧠 Analyzing financial data. This may take a few moments..."):
+    if run_analysis:
+        if not company_name_input or uploaded_file is None:
+            st.error("❌ Please provide both a company name and a PDF file.")
+        else:
+            # Clear session to force re-analysis
+            st.session_state.rag_chain = None
+            st.session_state.messages = []
+            
+            with st.spinner("Starting analysis... This may take a few minutes:"):
+                # 1. Upload PDF
+                pdf_bytes = uploaded_file.getvalue()
+                blob_name = f"input_documents/{company_name_input}_annual_report.pdf"
+                gcs_path = upload_file_to_gcs(pdf_bytes, GCS_BUCKET, blob_name)
+                pdf_temp_url = get_pdf_temp_url(GCS_BUCKET, blob_name)
             
             # 2. Get Company Details (Module 4)
             company_details = get_company_details(company_name_input)
@@ -650,7 +1009,7 @@ if run_button:
 
             # Calculate overall sentiment
             all_snippets = " ".join([item['snippet'] for item in industry_news + company_news])
-            sentiment, score = analyze_sentiment(all_snippets)
+            sentiment, score = analyze_sentiment(all_snippets)  # Returns (sentiment_label, score)
 
             # 4. Get Stock Data (Module 6)
             stock_overview, stock_df, stock_plot = get_stock_data(company_name_input)
@@ -664,58 +1023,64 @@ if run_button:
                 stock_overview or {}
             )
             
-            # 6. Display Analysis Summary in Main Content
+            # 6. Display Analysis Summary
+            st.session_state.analysis_complete = True
+            if stock_overview:
+                st.metric("Market Cap", format_market_cap(stock_overview.get('MarketCapitalization')))
+            st.success("Analysis complete!")
+            
+            # Display the analysis summary
             display_analysis_summary(
                 company_name=company_name_input,
                 company_details=company_details,
-                sentiment_score=score,  # From sentiment analysis
+                sentiment_score=score,  # Using the score from analyze_sentiment
                 stock_overview=stock_overview or {},
                 industry_news=industry_news,
                 company_news=company_news,
                 stock_plot=stock_plot
             )
             
-            # Keep minimal info in sidebar
-            with summary_placeholder.container():
-                st.subheader("Quick Stats")
-                st.metric("Sentiment", f"{score:.2f}", delta=None)
-                if stock_overview:
-                    st.metric("Market Cap", stock_overview.get('MarketCapitalization', 'N/A'))
-                    st.metric("P/E Ratio", stock_overview.get('PERatio', 'N/A'))
+            # Add initial assistant message
+            if not any(msg["content"].startswith("Analysis for") for msg in st.session_state.messages):
+                st.session_state.messages.append({"role": "assistant", "content": f"Analysis for **{company_name_input}** is complete. You can now ask questions about the annual report and market context."})
 
-            # 7. Update Chat
-            st.session_state.messages.append({"role": "assistant", "content": f"Analysis for **{company_name_input}** is complete. You can now ask questions about the annual report and market context."})
-
-# --- Chat Interface (Module 9) ---
+# Chat Interface
+st.markdown("### 💬 Ask a question about the financial report")
+st.caption("Example: What were the company's total revenues last year?")
 
 # Display chat messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Get user input
-if prompt := st.chat_input("Ask a question about the financial report..."):
+# Chat input
+prompt = st.chat_input("Type your question here...", key="chat_input")
+
+if prompt:
     # Add user message to chat history
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
     
-    # Check if analysis has been run
-    if st.session_state.rag_chain is None:
-        st.warning("Please upload a file and click 'Run Analysis' before asking questions.")
-    else:
-        # Generate and display assistant response
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                try:
-                    # Invoke the RAG chain
-                    response = st.session_state.rag_chain.invoke({"query": prompt})
-                    answer = response.get("result", "Sorry, I couldn't find an answer.")
-                    
-                    st.markdown(answer)
-                    
-                    # Add assistant response to chat history
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
+    # Show a loading message
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        message_placeholder.markdown("Analyzing your question...")
+        
+        try:
+            # Get the RAG chain
+            if st.session_state.rag_chain is None:
+                message_placeholder.error("Please run the analysis first.")
+            else:
+                # Get the answer
+                response = st.session_state.rag_chain.invoke({"query": prompt})
+                answer = response["result"]
+                
+                # Display the answer
+                message_placeholder.markdown(answer)
+                
+                # Add assistant response to chat history
+                st.session_state.messages.append({"role": "assistant", "content": answer})
 
-                except Exception as e:
-                    st.error(f"An error occurred: {e}")
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
