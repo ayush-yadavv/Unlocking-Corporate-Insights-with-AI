@@ -45,7 +45,7 @@ def format_market_cap(market_cap):
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
-from langchain.chains.retrieval_qa import RetrievalQA
+from langchain.chains.retrieval_qa.base import RetrievalQA
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import chromadb
