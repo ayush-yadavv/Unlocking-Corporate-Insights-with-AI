@@ -1,0 +1,16 @@
+streamlit
+google-cloud-storage
+google-cloud-aiplatform
+vertexai
+google-api-python-client
+alpha_vantage
+textblob
+pandas
+matplotlib
+langchain
+langchain-community
+langchain-google-genai
+chromadb
+sentence-transformers
+pypdf
+smart_open
